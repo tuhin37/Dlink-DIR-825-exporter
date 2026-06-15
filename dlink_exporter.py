@@ -27,6 +27,7 @@ from urllib.error import URLError
 from web_scraper import DlinkScraper, ScrapeResult, InterfaceStats, PortStats, DhcpLease, ClientInfo, RouteEntry
 
 import yaml
+from dotenv import load_dotenv
 
 # ---------------------------------------------------------------------------
 # Config
@@ -52,7 +53,10 @@ DEFAULT_CONFIG = {
 
 
 def load_config():
-    """Load config from YAML file with env var overrides."""
+    """Load config from config.yaml + .env + env vars."""
+    # Load .env file first (overrides YAML defaults)
+    load_dotenv()
+
     cfg_path = os.environ.get("DLINK_CONFIG", "config.yaml")
     cfg = dict(DEFAULT_CONFIG)
 
@@ -67,6 +71,8 @@ def load_config():
     # Env overrides
     if os.environ.get("DLINK_ROUTER_HOST"):
         cfg["router"]["host"] = os.environ["DLINK_ROUTER_HOST"]
+    if os.environ.get("DLINK_USERNAME"):
+        cfg["router"]["username"] = os.environ["DLINK_USERNAME"]
     if os.environ.get("DLINK_PASSWORD"):
         cfg["router"]["password"] = os.environ["DLINK_PASSWORD"]
     if os.environ.get("DLINK_LISTEN_PORT"):
