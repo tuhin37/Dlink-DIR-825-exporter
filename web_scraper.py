@@ -206,12 +206,8 @@ class DlinkScraper:
         result = ScrapeResult()
 
         if self.browser_service_url:
-            # Remote mode: re-login before each scrape batch (session expires in 300s)
-            log.info("Remote browser mode — re-logging in and scraping all pages")
-            try:
-                self._login_remote()
-            except Exception as e:
-                log.warning("Re-login failed, continuing with existing session: %s", e)
+            # Remote mode: scrape each page as text and parse
+            log.info("Remote browser mode — scraping all pages")
 
             try:
                 text = self._scrape_page_text("home")
