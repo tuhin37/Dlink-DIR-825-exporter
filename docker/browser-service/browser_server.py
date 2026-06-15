@@ -36,12 +36,18 @@ class BrowserHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
-            self.wfile.write(json.dumps({"ok": True, "service": "browser-service"}).encode())
+            try:
+                self.wfile.write(json.dumps({"ok": True, "service": "browser-service"}).encode())
+            except BrokenPipeError:
+                pass  # Client disconnected — not an error
         else:
             self.send_response(404)
             self.send_header("Content-Type", "text/plain")
             self.end_headers()
-            self.wfile.write(b"Not found")
+            try:
+                self.wfile.write(b"Not found")
+            except BrokenPipeError:
+                pass
 
     def do_POST(self):
         path = urlparse(self.path).path
@@ -59,7 +65,10 @@ class BrowserHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
-        self.wfile.write(json.dumps(result).encode())
+        try:
+            self.wfile.write(json.dumps(result).encode())
+        except BrokenPipeError:
+            pass
 
     def _handle_login(self, params):
         global PAGE
