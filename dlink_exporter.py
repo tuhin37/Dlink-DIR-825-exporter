@@ -34,6 +34,7 @@ from urllib.error import URLError
 from web_scraper import DlinkScraper, ScrapeResult, InterfaceStats, PortStats, DhcpLease, ClientInfo, RouteEntry
 
 import yaml
+import threading
 from dotenv import load_dotenv
 
 # ---------------------------------------------------------------------------
@@ -662,10 +663,12 @@ def run_exporter(config):
     # First scrape
     collector.scrape()
 
-    # Start HTTP server (threaded so browser scrape doesn't block Prometheus scrapes)
+    # Start HTTP server in a background thread so browser scrapes don't block Prometheus.
     addr = config["exporter"]["listen_address"]
     port = config["exporter"]["listen_port"]
     server = ThreadedHTTPServer((addr, port), MetricsHandler)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
     log.info("Exporter listening on %s:%d", addr, port)
 
     # Scrape loop
