@@ -186,6 +186,7 @@ class MetricsCollector:
         self.client = client
         self._metrics = ""
         self._last_scrape = 0
+        self._last_good_scraped: Optional[ScrapeResult] = None  # cache last successful scrape
 
     def scrape(self, scraped: Optional[ScrapeResult] = None):
         """Collect all metrics from the router."""
@@ -208,7 +209,19 @@ class MetricsCollector:
             self._collect_system_time(lines)
             self._collect_dhcp_leases(lines)
             if scraped:
-                self.add_web_scraped_metrics(lines, scraped)
+                # Only use the new scrape if it has at least some web-scraped data.
+                # Otherwise fall back to the last good scrape (avoids tables going empty
+                # when the browser scrape occasionally fails).
+                use_scraped = scraped
+                has_web_data = (
+                    scraped.interfaces or scraped.ports or scraped.dhcp_leases
+                    or scraped.clients or scraped.wifi_clients
+                )
+                if not has_web_data and self._last_good_scraped is not None:
+                    use_scraped = self._last_good_scraped
+                else:
+                    self._last_good_scraped = scraped
+                self.add_web_scraped_metrics(lines, use_scraped)
         except Exception as e:
             log.error("Scrape error: %s", e)
             lines.append(f'# ERROR: {e}')
