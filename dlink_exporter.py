@@ -674,23 +674,38 @@ def run_exporter(config):
         while True:
             now = time.time()
 
-            # Periodic browser-based scrape (every 5 min)
+            # Periodic browser-based scrape (every 60s)
             if scraper and (now - last_browser_scrape >= browser_scrape_interval):
-                try:
-                    last_scraped = scraper.scrape_all()
-                    last_browser_scrape = now
-                    log.info("Browser scrape complete: %d interfaces, %d ports, %d leases, %d clients, %d routes, %d log lines",
-                             len(last_scraped.interfaces), len(last_scraped.ports),
-                             len(last_scraped.dhcp_leases), len(last_scraped.clients),
-                             len(last_scraped.routes), len(last_scraped.syslog_entries))
-                except Exception as e:
-                    log.warning("Browser scrape failed, will retry: %s", e)
-                    # Try to restart the scraper
+                for attempt in range(2):  # retry once on failure
                     try:
-                        scraper.close()
-                        scraper.start()
-                    except Exception:
-                        pass
+                        last_scraped = scraper.scrape_all()
+                        last_browser_scrape = now
+                        log.info("Browser scrape complete: %d interfaces, %d ports, %d leases, %d clients, %d routes, %d log lines",
+                                 len(last_scraped.interfaces), len(last_scraped.ports),
+                                 len(last_scraped.dhcp_leases), len(last_scraped.clients),
+                                 len(last_scraped.routes), len(last_scraped.syslog_entries))
+                        # If result has no web data, retry once
+                        if attempt == 0 and not (
+                            last_scraped.interfaces or last_scraped.ports
+                            or last_scraped.dhcp_leases or last_scraped.clients
+                            or last_scraped.wifi_clients
+                        ):
+                            log.warning("Browser scrape returned empty data, retrying...")
+                            time.sleep(5)
+                            continue
+                        break
+                    except Exception as e:
+                        log.warning("Browser scrape attempt %d failed: %s", attempt + 1, e)
+                        if attempt == 0:
+                            # Try to restart the scraper before retry
+                            try:
+                                scraper.close()
+                                scraper.start()
+                            except Exception:
+                                pass
+                            time.sleep(5)
+                            continue
+                        break
 
             # Periodic metrics scrape (every 60s)
             if now - last_metrics_scrape >= metrics_interval:
