@@ -18,10 +18,13 @@ import json
 import logging
 import hashlib
 from pathlib import Path
+from typing import Optional
 from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.request import Request, urlopen
 from urllib.error import URLError
+
+from web_scraper import DlinkScraper, ScrapeResult, InterfaceStats, PortStats, DhcpLease, ClientInfo, RouteEntry
 
 import yaml
 
@@ -178,7 +181,7 @@ class MetricsCollector:
         self._metrics = ""
         self._last_scrape = 0
 
-    def scrape(self):
+    def scrape(self, scraped: Optional[ScrapeResult] = None):
         """Collect all metrics from the router."""
         if not self.client.ensure_login():
             self._metrics = "# ERROR: Cannot authenticate with router\n"
@@ -198,6 +201,8 @@ class MetricsCollector:
             self._collect_wan(lines)
             self._collect_system_time(lines)
             self._collect_dhcp_leases(lines)
+            if scraped:
+                self.add_web_scraped_metrics(lines, scraped)
         except Exception as e:
             log.error("Scrape error: %s", e)
             lines.append(f'# ERROR: {e}')
@@ -390,31 +395,124 @@ class MetricsCollector:
         lines.append("# TYPE dhcp_lease_info gauge")
         lines.append('dhcp_lease_info{hostname="",ip="",mac=""} 0')
 
+    # -- Web scraped metrics (requires Playwright) ---------------------------
+
+    def add_web_scraped_metrics(self, lines, scraped: ScrapeResult):
+        """Add metrics from Playwright web scraping."""
+        self._add_interface_stats(lines, scraped.interfaces)
+        self._add_port_stats(lines, scraped.ports)
+        self._add_dhcp_leases(lines, scraped.dhcp_leases)
+        self._add_clients(lines, scraped.clients)
+        self._add_routes(lines, scraped.routes)
+
+    def _add_interface_stats(self, lines, interfaces: list[InterfaceStats]):
+        if not interfaces:
+            return
+        lines.append("# HELP interface_rx_bytes Total bytes received on interface")
+        lines.append("# TYPE interface_rx_bytes counter")
+        for iface in interfaces:
+            lines.append(f'interface_rx_bytes{{name="{iface.name}"}} {iface.rx_bytes}')
+        lines.append("# HELP interface_tx_bytes Total bytes transmitted on interface")
+        lines.append("# TYPE interface_tx_bytes counter")
+        for iface in interfaces:
+            lines.append(f'interface_tx_bytes{{name="{iface.name}"}} {iface.tx_bytes}')
+        lines.append("# HELP interface_rx_errors Total receive errors on interface")
+        lines.append("# TYPE interface_rx_errors counter")
+        for iface in interfaces:
+            lines.append(f'interface_rx_errors{{name="{iface.name}"}} {iface.rx_errors}')
+        lines.append("# HELP interface_tx_errors Total transmit errors on interface")
+        lines.append("# TYPE interface_tx_errors counter")
+        for iface in interfaces:
+            lines.append(f'interface_tx_errors{{name="{iface.name}"}} {iface.tx_errors}')
+
+    def _add_port_stats(self, lines, ports: list[PortStats]):
+        if not ports:
+            return
+        # Port traffic
+        lines.append("# HELP port_rx_bytes Total bytes received on port")
+        lines.append("# TYPE port_rx_bytes counter")
+        for p in ports:
+            lines.append(f'port_rx_bytes{{port="{p.port_id}",alias="{p.alias}"}} {p.bytes_received}')
+        lines.append("# HELP port_tx_bytes Total bytes sent on port")
+        lines.append("# TYPE port_tx_bytes counter")
+        for p in ports:
+            lines.append(f'port_tx_bytes{{port="{p.port_id}",alias="{p.alias}"}} {p.bytes_sent}')
+        # Port link
+        lines.append("# HELP port_link_up Port link status")
+        lines.append("# TYPE port_link_up gauge")
+        for p in ports:
+            lines.append(f'port_link_up{{port="{p.port_id}",alias="{p.alias}",speed="{p.link_speed}"}} {int(p.link_up)}')
+        # Port utilization
+        lines.append("# HELP port_in_utilization_pct Port inbound utilization percent")
+        lines.append("# TYPE port_in_utilization_pct gauge")
+        for p in ports:
+            lines.append(f'port_in_utilization_pct{{port="{p.port_id}"}} {p.in_util_pct}')
+        lines.append("# HELP port_out_utilization_pct Port outbound utilization percent")
+        lines.append("# TYPE port_out_utilization_pct gauge")
+        for p in ports:
+            lines.append(f'port_out_utilization_pct{{port="{p.port_id}"}} {p.out_util_pct}')
+
+    def _add_dhcp_leases(self, lines, leases: list[DhcpLease]):
+        lines.append("# HELP dhcp_lease_count Number of active DHCP leases")
+        lines.append("# TYPE dhcp_lease_count gauge")
+        lines.append(f"dhcp_lease_count {len(leases)}")
+        if leases:
+            lines.append("# HELP dhcp_lease_info DHCP lease information")
+            lines.append("# TYPE dhcp_lease_info gauge")
+            for l in leases:
+                lines.append(f'dhcp_lease_info{{hostname="{l.hostname}",ip="{l.ip}",mac="{l.mac}"}} 1')
+
+    def _add_clients(self, lines, clients: list[ClientInfo]):
+        lines.append("# HELP wifi_client_count Number of connected WiFi clients")
+        lines.append("# TYPE wifi_client_count gauge")
+        lines.append(f"wifi_client_count {len(clients)}")
+        if clients:
+            lines.append("# HELP wifi_client_info Connected WiFi client info")
+            lines.append("# TYPE wifi_client_info gauge")
+            for c in clients:
+                lines.append(f'wifi_client_info{{mac="{c.mac}",ip="{c.ip}",hostname="{c.hostname}",interface="{c.interface}"}} 1')
+
+    def _add_routes(self, lines, routes: list[RouteEntry]):
+        lines.append("# HELP route_count Number of routing table entries")
+        lines.append("# TYPE route_count gauge")
+        lines.append(f"route_count {len(routes)}")
+        if routes:
+            lines.append("# HELP route_info Routing table entry")
+            lines.append("# TYPE route_info gauge")
+            for r in routes:
+                lines.append(f'route_info{{destination="{r.destination}",gateway="{r.gateway}",netmask="{r.netmask}",interface="{r.interface}",metric="{r.metric}"}} 1')
+
     # ------------------------------------------------------------------
     # Syslog scraping (writes to file for Promtail)
     # ------------------------------------------------------------------
 
-    def scrape_syslog(self, log_path: str):
-        """Scrape syslog from the router and write to a file.
-        
-        Note: The dsysinit stats layer (Device.Services.Syslog.*) is not
-        accessible via the CPE API on this router model. The web UI renders
-        logs client-side via Angular.
-        This is a placeholder for future web-scraping implementation.
-        """
-        # For now, write a heartbeat entry so Promtail can confirm the file is active
-        now = datetime.now().strftime("%b %d %H:%M:%S")
-        entry = f"{now} dlink-exporter[1]: syslog collector active (heartbeat)\n"
+    def scrape_syslog(self, log_path: str, scraped: Optional[ScrapeResult] = None):
+        """Scrape syslog from the router and write to a file."""
+        log_path = Path(log_path)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        now = datetime.now()
+
+        # Write scraped syslog entries if available
+        if scraped and scraped.syslog_entries:
+            for entry in scraped.syslog_entries:
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(log_path, "a") as f:
+                    f.write(entry.rstrip() + "\n")
+        else:
+            # Heartbeat when no scraper available
+            entry = f"{now.strftime('%b %d %H:%M:%S')} dlink-exporter[1]: syslog collector active (heartbeat)\n"
+            try:
+                with open(log_path, "a") as f:
+                    f.write(entry)
+            except OSError as e:
+                log.warning("Cannot write syslog file %s: %s", log_path, e)
+
+        # Rotate if too large
         try:
-            log_path = Path(log_path)
-            log_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(log_path, "a") as f:
-                f.write(entry)
-            # Rotate if too large
             if log_path.stat().st_size > DEFAULT_CONFIG["logging"]["log_max_size"]:
                 log_path.rename(log_path.with_suffix(".log.1"))
-        except OSError as e:
-            log.warning("Cannot write syslog file %s: %s", log_path, e)
+        except OSError:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -480,6 +578,20 @@ def run_exporter(config):
     collector = MetricsCollector(client)
     server_collector = collector
 
+    # Start Playwright scraper (optional - graceful fallback if unavailable)
+    scraper = None
+    try:
+        scraper = DlinkScraper(
+            host=config["router"]["host"],
+            username=config["router"]["username"],
+            password=config["router"]["password"],
+        )
+        scraper.start()
+        log.info("Web scraper started")
+    except Exception as e:
+        log.warning("Web scraper not available (install playwright + chromium): %s", e)
+        log.warning("Metrics requiring web scraping will show placeholder values")
+
     # First scrape
     collector.scrape()
 
@@ -492,22 +604,44 @@ def run_exporter(config):
     # Scrape loop
     last_metrics_scrape = time.time()
     last_log_scrape = time.time()
+    last_browser_scrape = 0
     metrics_interval = config["exporter"]["scrape_interval"]
     log_interval = config["exporter"]["log_scrape_interval"]
     log_file = config["logging"]["log_file"]
+    browser_scrape_interval = 300  # 5 minutes for browser-based scraping
+
+    last_scraped: Optional[ScrapeResult] = None
 
     try:
         while True:
             now = time.time()
 
-            # Periodic metrics scrape
+            # Periodic browser-based scrape (every 5 min)
+            if scraper and (now - last_browser_scrape >= browser_scrape_interval):
+                try:
+                    last_scraped = scraper.scrape_all()
+                    last_browser_scrape = now
+                    log.info("Browser scrape complete: %d interfaces, %d ports, %d leases, %d clients, %d routes, %d log lines",
+                             len(last_scraped.interfaces), len(last_scraped.ports),
+                             len(last_scraped.dhcp_leases), len(last_scraped.clients),
+                             len(last_scraped.routes), len(last_scraped.syslog_entries))
+                except Exception as e:
+                    log.warning("Browser scrape failed, will retry: %s", e)
+                    # Try to restart the scraper
+                    try:
+                        scraper.close()
+                        scraper.start()
+                    except Exception:
+                        pass
+
+            # Periodic metrics scrape (every 60s)
             if now - last_metrics_scrape >= metrics_interval:
-                collector.scrape()
+                collector.scrape(scraped=last_scraped)
                 last_metrics_scrape = now
 
-            # Periodic syslog scrape (placeholder)
+            # Periodic syslog scrape (every 30s)
             if now - last_log_scrape >= log_interval:
-                collector.scrape_syslog(log_file)
+                collector.scrape_syslog(log_file, scraped=last_scraped)
                 last_log_scrape = now
 
             # Handle one HTTP request (blocks for up to 1 second)
@@ -517,6 +651,8 @@ def run_exporter(config):
     except KeyboardInterrupt:
         log.info("Shutting down...")
         server.server_close()
+        if scraper:
+            scraper.close()
 
 
 # ---------------------------------------------------------------------------
