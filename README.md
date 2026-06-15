@@ -77,21 +77,21 @@ For web-scraped metrics (port stats, DHCP leases, WiFi clients, syslog), install
 playwright install chromium
 ```
 
-### Option 2: Docker (not available — build locally if needed)
+### Option 2: Docker (arm64 image available)
+
+Pre-built images for `linux/arm64` at `ghcr.io/tuhin37/dlink-dir-825-exporter`:
 
 ```bash
-# Build image
-docker build -t dlink-exporter .
-
-# Run with .env file
 docker run -d \
   --name dlink-exporter \
   --restart unless-stopped \
   -p 9101:9101 \
   -v /var/log/dlink:/var/log/dlink \
   --env-file .env \
-  dlink-exporter
+  ghcr.io/tuhin37/dlink-dir-825-exporter:latest
 ```
+
+> **Note:** The image does NOT include Chromium/Playwright — web-scraped metrics (port stats, DHCP leases, WiFi clients, syslog) will show placeholder values. To enable full scraping, either run natively with Playwright installed or mount a sidecar browser.
 
 ## Configuration
 
