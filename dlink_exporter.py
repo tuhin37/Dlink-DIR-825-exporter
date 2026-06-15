@@ -653,7 +653,7 @@ def run_exporter(config):
     metrics_interval = config["exporter"]["scrape_interval"]
     log_interval = config["exporter"]["log_scrape_interval"]
     log_file = config["logging"]["log_file"]
-    browser_scrape_interval = 300  # 5 minutes for browser-based scraping
+    browser_scrape_interval = 60  # 1 minute for browser-based scraping
 
     last_scraped: Optional[ScrapeResult] = None
 

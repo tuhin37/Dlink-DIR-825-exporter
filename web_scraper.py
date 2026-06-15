@@ -205,6 +205,89 @@ class DlinkScraper:
         """Scrape all stats pages and return combined result."""
         result = ScrapeResult()
 
+        if self.browser_service_url:
+            # Remote mode: re-login before each scrape batch (session expires in 300s)
+            log.info("Remote browser mode — re-logging in and scraping all pages")
+            try:
+                self._login_remote()
+            except Exception as e:
+                log.warning("Re-login failed, continuing with existing session: %s", e)
+
+            try:
+                text = self._scrape_page_text("home")
+                result.wifi_clients = self._parse_clients_from_text(text)
+                result.connected_clients_count = len(result.wifi_clients)
+            except Exception as e:
+                log.warning("Home page wifi scrape failed: %s", e)
+
+            try:
+                text = self._scrape_page_text("clientmgm")
+                detailed = self._parse_clients_mgmt_from_text(text)
+                if detailed:
+                    # Merge clientmgm details into home page clients
+                    detail_map = {c.mac.upper(): c for c in detailed}
+                    if result.wifi_clients:
+                        for c in result.wifi_clients:
+                            d = detail_map.get(c.mac.upper())
+                            if d:
+                                c.signal = d.signal
+                                c.band = d.band
+                                if d.ssid:
+                                    c.ssid = d.ssid
+                    # Use clientmgm data as primary source (it's richer)
+                    result.wifi_clients = detailed
+                    # Count only clients with non-zero signal (truly connected)
+                    result.connected_clients_count = len(detailed) if detailed else 0
+            except Exception as e:
+                log.warning("Client management scrape failed: %s", e)
+
+        try:
+            text = self._scrape_page_text("syslog")
+            lines = [l.strip() for l in text.split("\n") if l.strip() and len(l) > 15]
+            result.syslog_entries = lines
+        except Exception as e:
+            log.warning("Syslog scrape failed: %s", e)
+
+        # -- NEW: scrape network stats, port stats, DHCP, clients, routing --
+        try:
+            text = self._scrape_page_text("network")
+            result.interfaces = self._parse_interfaces_from_text(text)
+        except Exception as e:
+            log.warning("Network stats scrape failed: %s", e)
+
+        try:
+            text = self._scrape_page_text("ports")
+            result.ports = self._parse_ports_from_text(text)
+        except Exception as e:
+            log.warning("Port stats scrape failed: %s", e)
+
+        try:
+            text = self._scrape_page_text("dhcp")
+            result.dhcp_leases = self._parse_dhcp_from_text(text)
+        except Exception as e:
+            log.warning("DHCP scrape failed: %s", e)
+
+        try:
+            text = self._scrape_page_text("clients")
+            result.clients = self._parse_clientsessions_from_text(text)
+        except Exception as e:
+            log.warning("Clients scrape failed: %s", e)
+
+        try:
+            text = self._scrape_page_text("routing")
+            result.routes = self._parse_routes_from_text(text)
+        except Exception as e:
+            log.warning("Routing scrape failed: %s", e)
+
+        log.info(
+            "Browser scrape complete: %d clients, %d leases, %d interfaces, %d ports, %d routes, %d log lines",
+            result.connected_clients_count, len(result.dhcp_leases),
+            len(result.interfaces), len(result.ports),
+            len(result.routes), len(result.syslog_entries),
+        )
+        return result
+
+        # Local mode: full detailed scraping with Playwright selectors
         try:
             result.interfaces = self._scrape_network_stats()
         except Exception as e:
@@ -245,11 +328,8 @@ class DlinkScraper:
 
         try:
             detailed = self._scrape_client_mgmt()
-            # Merge signal/band/ssid from detailed view into wifi_clients
             if detailed and result.wifi_clients:
-                detail_map = {}
-                for c in detailed:
-                    detail_map[c.mac.upper()] = c
+                detail_map = {c.mac.upper(): c for c in detailed}
                 for c in result.wifi_clients:
                     d = detail_map.get(c.mac.upper())
                     if d:
@@ -592,6 +672,197 @@ class DlinkScraper:
         page.goto(url, wait_until="networkidle", timeout=15000)
         page.wait_for_timeout(3000)
         return page.locator("body").inner_text()
+
+    def _parse_interfaces_from_text(self, text: str) -> list[InterfaceStats]:
+        """Parse network stats page text for interface traffic data."""
+        interfaces = []
+        # Text format from Angular:
+        # Name\tIP - Gateway\tRx/Tx\tRx/Tx errors\tDuration
+        # LAN
+        # IPv4:10.0.0.1/24 – -
+        # 14.23 Gbyte / 50.91 Gbyte	0 / 0	-
+        # dynamic_Internet
+        # IPv4:192.168.1.2/24 – 192.168.1.1
+        # 46.93 Gbyte / 10.19 Gbyte	0 / 0	17 h., 18 min
+        # skynet
+        # -
+        # 39.81 Mbyte / 6.13 Mbyte	2590 / 5	-
+        rows = text.split("\n")
+        i = 0
+        while i < len(rows):
+            line = rows[i].strip()
+            # Skip header/UI lines
+            if (not line or "Name" in line or "Home" in line or "Settings" in line
+                    or "Management" in line or "Statistics" in line or "DIR-825" in line
+                    or "Device is not available" in line):
+                i += 1
+                continue
+            # Detect interface name: known patterns
+            if line in ("LAN", "skynet", "skynet+") or line.startswith("dynamic_"):
+                name = "WAN" if line.startswith("dynamic_") else line
+                iface = InterfaceStats(name=name)
+                # Next line contains IP info
+                if i + 1 < len(rows):
+                    ip_line = rows[i + 1].strip()
+                    ip_match = re.search(r'IPv[46]:([0-9.]+/[0-9]+)', ip_line)
+                    gw_match = re.search(r'–\s*([0-9.]+)', ip_line)
+                    if ip_match:
+                        iface.ip = ip_match.group(1)
+                    if gw_match:
+                        iface.gateway = gw_match.group(1)
+                # Line after IP has traffic data
+                if i + 2 < len(rows):
+                    traffic_line = rows[i + 2].strip()
+                    # Parse "X.XX Gbyte / Y.YY Gbyte" or "X.XX Mbyte / Y.YY Mbyte"
+                    rx_match = re.search(r'([0-9.]+)\s*(G|M)byte\s*/\s*([0-9.]+)\s*(G|M)byte', traffic_line)
+                    if rx_match:
+                        rx_val = float(rx_match.group(1))
+                        rx_unit = rx_match.group(2)
+                        tx_val = float(rx_match.group(3))
+                        tx_unit = rx_match.group(4)
+                        multiplier = {"G": 1024**3, "M": 1024**2}
+                        iface.rx_bytes = int(rx_val * multiplier.get(rx_unit, 1))
+                        iface.tx_bytes = int(tx_val * multiplier.get(tx_unit, 1))
+                    # Parse errors
+                    err_match = re.search(r'(\d+)\s*/\s*(\d+)', traffic_line)
+                    if err_match:
+                        # First digit pair after traffic is errors
+                        parts = traffic_line.split("\t")
+                        for part in parts:
+                            err_pair = re.search(r'^(\d+)\s*/\s*(\d+)$', part.strip())
+                            if err_pair:
+                                iface.rx_errors = int(err_pair.group(1))
+                                iface.tx_errors = int(err_pair.group(2))
+                                break
+                interfaces.append(iface)
+                i += 1
+                continue
+            i += 1
+        return interfaces
+
+    def _parse_ports_from_text(self, text: str) -> list[PortStats]:
+        """Parse port statistics page text."""
+        ports = []
+        for line in text.split("\n"):
+            line = line.strip()
+            if not line or "Port" in line or "Home" in line or "Management" in line or "DIR-825" in line or "Device is not available" in line:
+                continue
+            # Format: LAN4\tConnected\t43006\t9981
+            port_match = re.match(r'(LAN\d|WAN)\t(Connected|-)\t(\d+)\t(\d+)', line)
+            if port_match:
+                port_id = port_match.group(1)
+                connected = port_match.group(2) == "Connected"
+                tx_mb = int(port_match.group(3))
+                rx_mb = int(port_match.group(4))
+                ports.append(PortStats(
+                    port_id=port_id,
+                    alias=port_id,
+                    link_up=connected,
+                    bytes_sent=tx_mb * 1024 * 1024,
+                    bytes_received=rx_mb * 1024 * 1024,
+                ))
+        return ports
+
+    def _parse_dhcp_from_text(self, text: str) -> list[DhcpLease]:
+        """Parse DHCP leases page text."""
+        leases = []
+        for line in text.split("\n"):
+            line = line.strip()
+            if not line or "Hostname" in line or "Home" in line or "Management" in line or "DIR-825" in line:
+                continue
+            # Format: hostname\tIP\tMAC\tExpires
+            parts = line.split("\t")
+            if len(parts) >= 3 and re.match(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}', parts[1].strip()):
+                lease = DhcpLease(
+                    hostname=parts[0].strip() if parts[0].strip() != "-" else "",
+                    ip=parts[1].strip(),
+                    mac=parts[2].strip(),
+                )
+                leases.append(lease)
+        return leases
+
+    def _parse_clientsessions_from_text(self, text: str) -> list[ClientInfo]:
+        """Parse clients and sessions page text."""
+        clients = []
+        for line in text.split("\n"):
+            line = line.strip()
+            if not line or "MAC" in line or "Home" in line or "Management" in line or "DIR-825" in line:
+                continue
+            # Format: MAC\tIP\tHostname\tFlags\tInterface
+            parts = line.split("\t")
+            if len(parts) >= 3 and re.match(r'([0-9A-Fa-f]{2}[:]){5}[0-9A-Fa-f]{2}', parts[0].strip()):
+                client = ClientInfo(
+                    mac=parts[0].strip().upper(),
+                    ip=parts[1].strip(),
+                    hostname=parts[2].strip() if parts[2].strip() != "-" else "",
+                    interface=parts[4].strip() if len(parts) >= 5 else "",
+                )
+                clients.append(client)
+        return clients
+
+    def _parse_routes_from_text(self, text: str) -> list[RouteEntry]:
+        """Parse routing table page text."""
+        routes = []
+        for line in text.split("\n"):
+            line = line.strip()
+            if not line or "Table" in line or "Home" in line or "Management" in line or "DIR-825" in line:
+                continue
+            # Format: table\tType\tIP (Src/Dst)\tInterfaces\tPriority\tToS\tFWmark
+            parts = line.split("\t")
+            if len(parts) >= 5 and parts[0] in ("main", "dhcp_2", "group_1") and parts[1] in ("IPv4", "IPv6"):
+                # These are routing rules, not very useful for dashboard
+                continue
+        return routes
+
+    def _parse_clients_mgmt_from_text(self, text: str) -> list[ClientInfo]:
+        """Parse WiFi Client Management page for per-client signal/band/SSID data.
+        
+        Tab-separated format from Angular:
+        Hostname\tMAC address\tBand\tNetwork name (SSID)\tSignal level\tOnline
+        -\t2C:CF:67:70:65:A0\t2.4 GHz\tskynet\t 100%\t3 h., 54 min
+        espressif\tA8:03:2A:DD:E8:B0\t2.4 GHz\tskynet\t 74%\t1 h., 53 min
+        """
+        clients = []
+        for line in text.split("\n"):
+            line = line.strip()
+            if not line or "Hostname" in line or "Home" in line or "Management" in line or "DIR-825" in line or "Device" in line:
+                continue
+            parts = line.split("\t")
+            if len(parts) >= 5:
+                hostname = parts[0].strip()
+                mac = parts[1].strip().upper()
+                band_raw = parts[2].strip()
+                ssid = parts[3].strip()
+                signal_raw = parts[4].strip().rstrip("%").strip()
+                
+                # Validate it's a real client entry (has a MAC)
+                if not re.match(r'([0-9A-Fa-f]{2}[:]){5}[0-9A-Fa-f]{2}', mac):
+                    continue
+                
+                band = ""
+                if "2.4" in band_raw:
+                    band = "2.4GHz"
+                elif "5" in band_raw:
+                    band = "5GHz"
+                
+                signal = 0
+                try:
+                    signal = int(signal_raw)
+                    if signal > 100:
+                        signal = 100
+                    elif signal < 0:
+                        signal = 0
+                except ValueError:
+                    signal = 0
+                
+                clients.append(ClientInfo(
+                    mac=mac,
+                    hostname=hostname if hostname != "-" else "",
+                    ssid=ssid,
+                    band=band,
+                    signal=signal,
+                ))
+        return clients
 
     def _parse_clients_from_text(self, text: str) -> list[ClientInfo]:
         """Parse WiFi clients from rendered page text."""

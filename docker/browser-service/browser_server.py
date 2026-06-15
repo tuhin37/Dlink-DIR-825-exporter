@@ -30,6 +30,19 @@ PAGE = None
 
 class BrowserHandler(BaseHTTPRequestHandler):
 
+    def do_GET(self):
+        path = urlparse(self.path).path
+        if path == "/health":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"ok": True, "service": "browser-service"}).encode())
+        else:
+            self.send_response(404)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"Not found")
+
     def do_POST(self):
         path = urlparse(self.path).path
         length = int(self.headers.get("Content-Length", 0))

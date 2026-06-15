@@ -5,10 +5,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Playwright and Chromium
-RUN pip install --no-cache-dir playwright>=1.40.0 && \
-    playwright install chromium && \
-    rm -rf /root/.cache/*
+# Install Playwright and headless Chromium
+RUN pip install --no-cache-dir playwright>=1.49.0 && \
+    playwright install --with-deps chromium && \
+    playwright install --with-deps chromium-headless-shell && \
+    rm -rf /root/.cache/pip/*
 
 WORKDIR /app
 COPY browser_server.py .
