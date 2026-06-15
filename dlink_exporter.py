@@ -21,6 +21,13 @@ from pathlib import Path
 from typing import Optional
 from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from socketserver import ThreadingMixIn
+
+
+class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+    """HTTP server that handles requests in separate threads."""
+    allow_reuse_address = True
+    daemon_threads = True
 from urllib.request import Request, urlopen
 from urllib.error import URLError
 
@@ -655,10 +662,10 @@ def run_exporter(config):
     # First scrape
     collector.scrape()
 
-    # Start HTTP server
+    # Start HTTP server (threaded so browser scrape doesn't block Prometheus scrapes)
     addr = config["exporter"]["listen_address"]
     port = config["exporter"]["listen_port"]
-    server = HTTPServer((addr, port), MetricsHandler)
+    server = ThreadedHTTPServer((addr, port), MetricsHandler)
     log.info("Exporter listening on %s:%d", addr, port)
 
     # Scrape loop
@@ -723,9 +730,9 @@ def run_exporter(config):
                 collector.scrape_syslog(log_file, scraped=last_scraped)
                 last_log_scrape = now
 
-            # Handle one HTTP request (blocks for up to 1 second)
-            server.timeout = 1
-            server.handle_request()
+            # Threaded HTTP server handles requests in background.
+            # Just sleep to avoid a tight loop.
+            time.sleep(1)
 
     except KeyboardInterrupt:
         log.info("Shutting down...")
