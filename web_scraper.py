@@ -138,13 +138,18 @@ class DlinkScraper:
         self._browser = None
         self._context = None
         self._page = None
+        self._last_login_attempt = 0  # track last re-login time
 
     def start(self):
         """Launch Playwright browser and login — locally or via remote service."""
         # If a remote browser service URL is configured, use it
         if self.browser_service_url:
-            log.info("Using remote browser service at %s", self.browser_service_url)
-            self._login_remote()
+            log.info("Remote browser service at %s", self.browser_service_url)
+            # Try login once. If it fails (already logged in), that's fine.
+            try:
+                self._login_remote()
+            except Exception as e:
+                log.info("Remote session exists (no fresh login needed): %s", e)
             return
 
         # Otherwise launch Playwright locally
@@ -206,7 +211,15 @@ class DlinkScraper:
         result = ScrapeResult()
 
         if self.browser_service_url:
-            # Remote mode: scrape each page as text and parse
+            # Remote mode: re-login every 4 min (router session expires in 5 min)
+            import time as _time
+            now = _time.time()
+            if now - self._last_login_attempt > 180:
+                try:
+                    self._login_remote()
+                    self._last_login_attempt = now
+                except Exception:
+                    pass  # old session still works
             log.info("Remote browser mode — scraping all pages")
 
             try:
