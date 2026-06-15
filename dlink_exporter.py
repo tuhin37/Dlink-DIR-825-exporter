@@ -618,16 +618,21 @@ def run_exporter(config):
     collector = MetricsCollector(client)
     server_collector = collector
 
-    # Start Playwright scraper (optional - graceful fallback if unavailable)
+    # Start Playwright scraper (optional - graceful fallback)
     scraper = None
+    browser_service = os.environ.get("DLINK_BROWSER_SERVICE", "")
     try:
         scraper = DlinkScraper(
             host=config["router"]["host"],
             username=config["router"]["username"],
             password=config["router"]["password"],
+            browser_service_url=browser_service,
         )
         scraper.start()
-        log.info("Web scraper started")
+        if browser_service:
+            log.info("Web scraper connected to remote browser service at %s", browser_service)
+        else:
+            log.info("Web scraper started (local Playwright)")
     except Exception as e:
         log.warning("Web scraper not available (install playwright + chromium): %s", e)
         log.warning("Metrics requiring web scraping will show placeholder values")

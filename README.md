@@ -79,9 +79,10 @@ playwright install chromium
 
 ### Option 2: Docker (arm64 image available)
 
-Pre-built images for `linux/arm64` at `ghcr.io/tuhin37/dlink-dir-825-exporter`:
+Pre-built images for `linux/arm64` at Docker Hub:
 
 ```bash
+docker pull tuhin37/dlink-dir-825-exporter:latest
 docker run -d \
   --name dlink-exporter \
   --restart unless-stopped \

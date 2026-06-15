@@ -110,8 +110,9 @@ class DlinkScraper:
         "syslog": f"{BASE_URL}/admin/index.html#/control/syslog",
     }
 
-    def __init__(self, host: str, username: str, password: str):
+    def __init__(self, host: str, username: str, password: str, browser_service_url: str = ""):
         self.host = host
+        self.browser_service_url = browser_service_url
         self.BASE_URL = f"http://{host}"
         self.LOGIN_URL = f"{self.BASE_URL}/admin/index.html"
         self.STATS_PAGES = {
@@ -139,7 +140,14 @@ class DlinkScraper:
         self._page = None
 
     def start(self):
-        """Launch Playwright browser and login."""
+        """Launch Playwright browser and login — locally or via remote service."""
+        # If a remote browser service URL is configured, use it
+        if self.browser_service_url:
+            log.info("Using remote browser service at %s", self.browser_service_url)
+            self._login_remote()
+            return
+
+        # Otherwise launch Playwright locally
         from playwright.sync_api import sync_playwright
 
         self._pw = sync_playwright().start()
@@ -539,6 +547,81 @@ class DlinkScraper:
             signal=raw.get("signal", 0),
             ipv6=raw.get("ipv6", ""),
         )
+
+    # -- Remote browser service mode -----------------------------------------
+
+    def _login_remote(self):
+        """Log in via remote browser service."""
+        import urllib.request as req
+        import json as j
+
+        payload = j.dumps({
+            "host": self.host,
+            "username": self.username,
+            "password": self.password,
+        }).encode()
+        r = req.Request(f"{self.browser_service_url}/login", data=payload,
+                         headers={"Content-Type": "application/json"}, method="POST")
+        resp = j.loads(req.urlopen(r, timeout=30).read())
+        if resp.get("ok"):
+            log.info("Remote login successful")
+        else:
+            raise RuntimeError(f"Remote login failed: {resp.get('error', 'unknown')}")
+
+    def _scrape_remote(self, page_key: str) -> str:
+        """Scrape a page via remote browser service. Returns body text."""
+        import urllib.request as req
+        import json as j
+
+        url = self._page_urls.get(page_key) or self.STATS_PAGES.get(page_key, "")
+        payload = j.dumps({"url": url}).encode()
+        r = req.Request(f"{self.browser_service_url}/scrape", data=payload,
+                         headers={"Content-Type": "application/json"}, method="POST")
+        resp = j.loads(req.urlopen(r, timeout=30).read())
+        if resp.get("ok"):
+            return resp.get("text", "")
+        raise RuntimeError(f"Remote scrape failed: {resp.get('error', 'unknown')}")
+
+    def _scrape_page_text(self, page_key: str) -> str:
+        """Get rendered page text — local or remote."""
+        if self.browser_service_url:
+            return self._scrape_remote(page_key)
+        # Local mode
+        page = self._page
+        url = self._page_urls.get(page_key) or self.STATS_PAGES.get(page_key, "")
+        page.goto(url, wait_until="networkidle", timeout=15000)
+        page.wait_for_timeout(3000)
+        return page.locator("body").inner_text()
+
+    def _parse_clients_from_text(self, text: str) -> list[ClientInfo]:
+        """Parse WiFi clients from rendered page text."""
+        clients = []
+        current = {}
+        for line in text.split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            mac_match = re.search(r'([0-9A-Fa-f]{2}[:.-]){5}[0-9A-Fa-f]{2}', line)
+            if mac_match:
+                if current.get("mac"):
+                    clients.append(self._build_client(current))
+                current = {"mac": mac_match.group(0).upper()}
+            elif current:
+                ip_match = re.search(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}', line)
+                if ip_match:
+                    current["ip"] = ip_match.group(0)
+                sig_match = re.search(r'(\d{1,3})\s*%', line)
+                if sig_match:
+                    current["signal"] = int(sig_match.group(1))
+                if "2.4" in line and "GHz" in line:
+                    current["band"] = "2.4GHz"
+                elif "5" in line and "GHz" in line:
+                    current["band"] = "5GHz"
+                elif 2 < len(line) < 30 and "hostname" not in current:
+                    current["hostname"] = line
+        if current.get("mac"):
+            clients.append(self._build_client(current))
+        return clients
 
     def close(self):
         """Clean up browser resources."""

@@ -1,0 +1,32 @@
+version: "3.8"
+
+services:
+  exporter:
+    image: tuhin37/dlink-dir-825-exporter:latest
+    container_name: dlink-exporter
+    restart: unless-stopped
+    ports:
+      - "9101:9101"
+    env_file:
+      - .env
+    environment:
+      - DLINK_BROWSER_SERVICE=http://browser-service:9200
+    volumes:
+      - /var/log/dlink:/var/log/dlink
+    depends_on:
+      browser-service:
+        condition: service_healthy
+
+  browser-service:
+    build:
+      context: ./docker/browser-service
+    container_name: dlink-browser
+    restart: unless-stopped
+    ports:
+      - "9200:9200"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9200", "||", "exit", "1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
