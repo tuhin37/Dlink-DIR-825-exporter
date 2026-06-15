@@ -1,11 +1,8 @@
 .git
 .gitignore
-.github
-*.md
-config.yaml
 __pycache__/
 *.pyc
 .DS_Store
-.hermes/
+config.yaml
 .env
 .env.example

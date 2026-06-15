@@ -77,11 +77,12 @@ For web-scraped metrics (port stats, DHCP leases, WiFi clients, syslog), install
 playwright install chromium
 ```
 
-### Option 2: Docker
-
-Pre-built images at `ghcr.io/tuhin37/dlink-dir-825-exporter`:
+### Option 2: Docker (not available — build locally if needed)
 
 ```bash
+# Build image
+docker build -t dlink-exporter .
+
 # Run with .env file
 docker run -d \
   --name dlink-exporter \
@@ -89,26 +90,8 @@ docker run -d \
   -p 9101:9101 \
   -v /var/log/dlink:/var/log/dlink \
   --env-file .env \
-  ghcr.io/tuhin37/dlink-dir-825-exporter:latest
+  dlink-exporter
 ```
-
-Or with inline env vars:
-
-```bash
-docker run -d \
-  --name dlink-exporter \
-  --restart unless-stopped \
-  -p 9101:9101 \
-  -v /var/log/dlink:/var/log/dlink \
-  -e DLINK_ROUTER_HOST=10.0.0.1 \
-  -e DLINK_USERNAME=admin \
-  -e DLINK_PASSWORD=your_password_here \
-  -e DLINK_LISTEN_PORT=9101 \
-  -e DLINK_LOG_FILE=/var/log/dlink/syslog.log \
-  ghcr.io/tuhin37/dlink-dir-825-exporter:latest
-```
-
-> **Note:** The Docker image does NOT include Chromium/Playwright — web-scraped metrics will show placeholder values. To enable full scraping, either run natively with Playwright installed or mount a sidecar browser.
 
 ## Configuration
 
@@ -164,25 +147,7 @@ DLINK_LOG_FILE=/var/log/dlink/syslog.log
 
 ## Versioning
 
-Images are tagged with [semantic versioning](https://semver.org/) — `vMAJOR.MINOR.PATCH`.
-
-- **PATCH** — bumped automatically on every merge to `main`
-- **MINOR** — bumped manually for new features
-- **MAJOR** — bumped manually for breaking changes
-
-The current version is read from the `VERSION` file in the repo root.
-
-## GitHub Actions CD
-
-On every push to `main` (i.e., PR merge), the `Docker Release` workflow:
-
-1. Reads the current version from `VERSION`
-2. Increments the **patch** number (z in `vx.y.z`)
-3. Builds the Docker image
-4. Pushes to `ghcr.io` with both the version tag and `latest`
-5. Commits the bumped `VERSION` file and creates a git tag
-
-To trigger a minor or major bump, manually edit the `VERSION` file before merging your PR.
+This project follows [semantic versioning](https://semver.org/) via the `VERSION` file (`vMAJOR.MINOR.PATCH`). Update it manually before tagging a release.
 
 ## Prometheus Scrape Config
 
