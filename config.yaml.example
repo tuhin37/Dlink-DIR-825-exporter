@@ -11,7 +11,7 @@ router:
 
 exporter:
   listen_address: "0.0.0.0"
-  listen_port: 9101
+  listen_port: 9101  # Metrics port — Prometheus scrapes :9101/metrics
   scrape_interval: 60  # seconds between metric scrapes
   log_scrape_interval: 30  # seconds between syslog scrapes
 
