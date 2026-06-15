@@ -1,6 +1,6 @@
 # D-Link DIR-825 Exporter
 
-Prometheus exporter for D-Link DIR-825 routers. Collects metrics via CPE JSON-RPC API and writes syslog to a file for Promtail to ship to Loki.
+Prometheus exporter for D-Link DIR-825 routers. Collects metrics via CPE JSON-RPC API and Playwright web scraping. Writes syslog to a file for Promtail to ship to Loki.
 
 ## Architecture
 
@@ -22,49 +22,102 @@ Prometheus ────────▶│  dlink_exporter.py           │
 
 All metrics use **generic naming** — no vendor-specific prefixes — so they remain consistent when other routers/APs (MikroTik, Ubiquiti, etc.) are added later.
 
-| Metric | Source | Labels |
-|---|---|---|
-| `device_info` | CPE API | model, vendor, fw_version, hw_revision, mode, mac |
-| `device_uptime_seconds` | CPE API | — |
-| `wifi_radio_status` | CPE API | band (2.4GHz, 5GHz) |
-| `wifi_ap_enabled` | CPE API | ssid, band |
-| `interface_up` | CPE API | name, type (wifi/bridge/loopback) |
-| `lan_ip_info` | CPE API | address, type |
-| `wan_ip_info` | CPE API | address, type |
-| `wan_connection_status` | CPE API | status |
-| `switch_port_enabled` | CPE API | port, alias |
-| `system_time_seconds` | CPE API | — |
-| `dhcp_lease_count` | placeholder | — |
-| `dhcp_lease_info` | placeholder | hostname, ip, mac |
+### CPE API (always available, 60s interval)
 
-## Limitations
+| Metric | Labels |
+|---|---|
+| `device_info` | model, vendor, fw_version, hw_revision, mode, mac |
+| `device_uptime_seconds` | — |
+| `wifi_radio_status` | band (2.4GHz, 5GHz) |
+| `wifi_ap_enabled` | ssid, band |
+| `interface_up` | name, type (wifi/bridge/loopback) |
+| `lan_ip_info` | address, type |
+| `wan_ip_info` | address, type |
+| `wan_connection_status` | status |
+| `switch_port_enabled` | port, alias |
+| `system_time_seconds` | — |
 
-**`Device.Statistics.*` (detailed port/interface stats) is NOT accessible via the CPE API** on this router model. The Angular web UI loads these stats through a separate internal data layer (`dsysinit`) that isn't exposed to external API calls. This means the following metrics require future web-scraping enhancement:
+### Web Scraped (needs Playwright, 5min interval)
 
-- Port traffic (bytes/packets sent/received)
-- Port errors (CRC, discards, collisions, fragments)
-- Port utilization and current speed
-- Interface network stats (RX/TX bytes per interface)
-- DHCP lease details
-- Connected WiFi clients (MAC, IP, hostname)
-- Full syslog entries
+| Metric | Labels |
+|---|---|
+| `interface_rx_bytes`, `interface_tx_bytes` | name |
+| `interface_rx_errors`, `interface_tx_errors` | name |
+| `port_rx_bytes`, `port_tx_bytes` | port, alias |
+| `port_link_up` | port, alias, speed |
+| `port_in_utilization_pct`, `port_out_utilization_pct` | port |
+| `dhcp_lease_info` | hostname, ip, mac |
+| `wifi_connected_clients_total` | — |
+| `wifi_client_signal` | mac, hostname, ip, ssid, band |
+| `wifi_client_band` | mac, hostname |
+| `wifi_client_online` | mac, hostname, ip, ssid |
+| `route_info` | destination, gateway, netmask, interface, metric |
 
-These will be added in a future release via headless browser or XHR interception.
+---
 
 ## Quick Start
 
+### Option 1: Native (bare-metal / VM)
+
 ```bash
+# Install dependencies
 pip install -r requirements.txt
 
-# Create config.yaml from example
+# Create config
 cp config.yaml.example config.yaml
-# Edit config.yaml with your router credentials
+# Edit config.yaml with your router password
 
 # Run
 python dlink_exporter.py
 ```
 
+For web-scraped metrics (port stats, DHCP leases, WiFi clients, syslog), install Playwright:
+
+```bash
+playwright install chromium
+```
+
+### Option 2: Docker
+
+Pre-built images at `ghcr.io/tuhin37/dlink-dir-825-exporter`:
+
+```bash
+# Run with .env file
+docker run -d \
+  --name dlink-exporter \
+  --restart unless-stopped \
+  -p 9101:9101 \
+  -v /var/log/dlink:/var/log/dlink \
+  --env-file .env \
+  ghcr.io/tuhin37/dlink-dir-825-exporter:latest
+```
+
+Or with inline env vars:
+
+```bash
+docker run -d \
+  --name dlink-exporter \
+  --restart unless-stopped \
+  -p 9101:9101 \
+  -v /var/log/dlink:/var/log/dlink \
+  -e DLINK_ROUTER_HOST=10.0.0.1 \
+  -e DLINK_USERNAME=admin \
+  -e DLINK_PASSWORD=your_password_here \
+  -e DLINK_LISTEN_PORT=9101 \
+  -e DLINK_LOG_FILE=/var/log/dlink/syslog.log \
+  ghcr.io/tuhin37/dlink-dir-825-exporter:latest
+```
+
+> **Note:** The Docker image does NOT include Chromium/Playwright — web-scraped metrics will show placeholder values. To enable full scraping, either run natively with Playwright installed or mount a sidecar browser.
+
 ## Configuration
+
+Configuration is resolved in this order (later overrides earlier):
+
+1. Defaults (hardcoded in `dlink_exporter.py`)
+2. `config.yaml` (if it exists)
+3. `.env` file (via `python-dotenv`)
+4. Environment variables (highest priority)
 
 ### config.yaml
 
@@ -76,22 +129,60 @@ router:
 
 exporter:
   listen_address: "0.0.0.0"
-  listen_port: 9101
-  scrape_interval: 60
-  log_scrape_interval: 30
+  listen_port: 9101       # Metrics port — Prometheus scrapes :9101/metrics
+  scrape_interval: 60      # seconds between metric scrapes
+  log_scrape_interval: 30  # seconds between syslog scrapes
 
 logging:
   log_file: "/var/log/dlink/syslog.log"
-  log_max_size: 10485760  # 10MB
+  log_max_size: 10485760   # 10MB
 ```
 
-### Environment variables (override config.yaml)
+### .env file
 
-- `DLINK_CONFIG` — path to config.yaml (default: `config.yaml`)
-- `DLINK_ROUTER_HOST` — router IP
-- `DLINK_PASSWORD` — router password
-- `DLINK_LISTEN_PORT` — exporter port
-- `DLINK_LOG_FILE` — syslog output path
+```bash
+# Router connection
+DLINK_ROUTER_HOST=10.0.0.1
+DLINK_USERNAME=admin
+DLINK_PASSWORD=your_router_password_here
+
+# Metrics port (Prometheus scrapes this endpoint)
+DLINK_LISTEN_PORT=9101
+DLINK_LOG_FILE=/var/log/dlink/syslog.log
+```
+
+### Environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `DLINK_CONFIG` | `config.yaml` | Path to config YAML |
+| `DLINK_ROUTER_HOST` | `10.0.0.1` | Router IP address |
+| `DLINK_USERNAME` | `admin` | Router admin username |
+| `DLINK_PASSWORD` | — | Router admin password (**required**) |
+| `DLINK_LISTEN_PORT` | `9101` | Metrics port for Prometheus scraping |
+| `DLINK_LOG_FILE` | `/var/log/dlink/syslog.log` | Syslog output path |
+
+## Versioning
+
+Images are tagged with [semantic versioning](https://semver.org/) — `vMAJOR.MINOR.PATCH`.
+
+- **PATCH** — bumped automatically on every merge to `main`
+- **MINOR** — bumped manually for new features
+- **MAJOR** — bumped manually for breaking changes
+
+The current version is read from the `VERSION` file in the repo root.
+
+## GitHub Actions CD
+
+On every push to `main` (i.e., PR merge), the `Docker Release` workflow:
+
+1. Reads the current version from `VERSION`
+2. Increments the **patch** number (z in `vx.y.z`)
+3. Builds the Docker image
+4. Pushes to `ghcr.io` with both the version tag and `latest`
+5. Commits the bumped `VERSION` file and creates a git tag
+
+To trigger a minor or major bump, manually edit the `VERSION` file before merging your PR.
 
 ## Prometheus Scrape Config
 
@@ -103,8 +194,6 @@ scrape_configs:
 ```
 
 ## Promtail Config (for syslog → Loki)
-
-Add to your Promtail config:
 
 ```yaml
 scrape_configs:
