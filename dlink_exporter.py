@@ -404,6 +404,7 @@ class MetricsCollector:
         self._add_dhcp_leases(lines, scraped.dhcp_leases)
         self._add_clients(lines, scraped.clients)
         self._add_routes(lines, scraped.routes)
+        self._add_wifi_clients(lines, scraped.wifi_clients, scraped.connected_clients_count)
 
     def _add_interface_stats(self, lines, interfaces: list[InterfaceStats]):
         if not interfaces:
@@ -471,6 +472,39 @@ class MetricsCollector:
             lines.append("# TYPE wifi_client_info gauge")
             for c in clients:
                 lines.append(f'wifi_client_info{{mac="{c.mac}",ip="{c.ip}",hostname="{c.hostname}",interface="{c.interface}"}} 1')
+
+    def _add_wifi_clients(self, lines, clients: list[ClientInfo], total_count: int):
+        """Add enriched WiFi client metrics from home page + client management."""
+        lines.append("# HELP wifi_connected_clients_total Total number of connected WiFi clients")
+        lines.append("# TYPE wifi_connected_clients_total gauge")
+        lines.append(f"wifi_connected_clients_total {total_count}")
+
+        if not clients:
+            return
+
+        lines.append("# HELP wifi_client_signal Signal strength of WiFi client (0-100%)")
+        lines.append("# TYPE wifi_client_signal gauge")
+        for c in clients:
+            labels = f'mac="{c.mac}",hostname="{c.hostname}",ip="{c.ip}",ssid="{c.ssid}",band="{c.band}"'
+            lines.append(f'wifi_client_signal{{{labels}}} {c.signal}')
+
+        lines.append("# HELP wifi_client_band Frequency band of WiFi client connection")
+        lines.append("# TYPE wifi_client_band gauge")
+        for c in clients:
+            if c.band == "2.4GHz":
+                band_val = 1
+            elif c.band == "5GHz":
+                band_val = 2
+            else:
+                band_val = 0
+            labels = f'mac="{c.mac}",hostname="{c.hostname}"'
+            lines.append(f'wifi_client_band{{{labels}}} {band_val}')
+
+        lines.append("# HELP wifi_client_online WiFi client is currently connected (1) or offline (0)")
+        lines.append("# TYPE wifi_client_online gauge")
+        for c in clients:
+            labels = f'mac="{c.mac}",hostname="{c.hostname}",ip="{c.ip}",ssid="{c.ssid}"'
+            lines.append(f'wifi_client_online{{{labels}}} 1')
 
     def _add_routes(self, lines, routes: list[RouteEntry]):
         lines.append("# HELP route_count Number of routing table entries")

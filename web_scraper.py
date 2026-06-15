@@ -58,6 +58,10 @@ class ClientInfo:
     ip: str = ""
     hostname: str = ""
     interface: str = ""
+    ssid: str = ""
+    band: str = ""
+    signal: int = 0
+    ipv6: str = ""
 
 
 @dataclass
@@ -70,6 +74,16 @@ class RouteEntry:
 
 
 @dataclass
+class WanInfo:
+    """WAN connection info from home page dashboard."""
+    ipv4_address: str = ""
+    ipv4_status: str = ""
+    ipv6_address: str = ""
+    ipv6_status: str = ""
+    connection_type: str = ""
+
+
+@dataclass
 class ScrapeResult:
     interfaces: list[InterfaceStats] = field(default_factory=list)
     ports: list[PortStats] = field(default_factory=list)
@@ -77,6 +91,8 @@ class ScrapeResult:
     clients: list[ClientInfo] = field(default_factory=list)
     routes: list[RouteEntry] = field(default_factory=list)
     syslog_entries: list[str] = field(default_factory=list)
+    wifi_clients: list[ClientInfo] = field(default_factory=list)
+    connected_clients_count: int = 0
 
 
 class DlinkScraper:
@@ -107,7 +123,14 @@ class DlinkScraper:
                 "clients": "clients_sessions",
                 "routing": "routing",
                 "syslog": "syslog",
+                "home": "",          # just #/home
+                "clientmgm": "",     # /functions/wifi/clientmgm
             }.items()
+        }
+        # Override the special paths
+        self._page_urls = {
+            "home": f"{self.BASE_URL}/admin/index.html#/home",
+            "clientmgm": f"{self.BASE_URL}/admin/index.html#/functions/wifi/clientmgm",
         }
         self.username = username
         self.password = password
@@ -203,6 +226,34 @@ class DlinkScraper:
             result.syslog_entries = self._scrape_syslog()
         except Exception as e:
             log.warning("Syslog scrape failed: %s", e)
+
+        # WiFi-specific pages
+        try:
+            wifi_clients = self._scrape_home_wifi_clients()
+            result.wifi_clients = wifi_clients
+            result.connected_clients_count = len(wifi_clients)
+        except Exception as e:
+            log.warning("Home page wifi scrape failed: %s", e)
+
+        try:
+            detailed = self._scrape_client_mgmt()
+            # Merge signal/band/ssid from detailed view into wifi_clients
+            if detailed and result.wifi_clients:
+                detail_map = {}
+                for c in detailed:
+                    detail_map[c.mac.upper()] = c
+                for c in result.wifi_clients:
+                    d = detail_map.get(c.mac.upper())
+                    if d:
+                        c.signal = d.signal
+                        c.band = d.band
+                        if d.ssid:
+                            c.ssid = d.ssid
+            elif detailed and not result.wifi_clients:
+                result.wifi_clients = detailed
+                result.connected_clients_count = len(detailed)
+        except Exception as e:
+            log.warning("Client management scrape failed: %s", e)
 
         return result
 
@@ -367,6 +418,127 @@ class DlinkScraper:
                     entries.append(line)
 
         return entries
+
+    # -- WiFi client pages ---------------------------------------------------
+
+    def _scrape_home_wifi_clients(self) -> list[ClientInfo]:
+        """Scrape Home page for connected WiFi clients.
+        
+        Home page renders a client table with: MAC, IPv4, IPv6, Hostname, SSID.
+        """
+        page = self._page
+        page.goto(self._page_urls["home"], wait_until="networkidle", timeout=15000)
+        page.wait_for_timeout(3000)
+
+        clients = []
+        # Home page shows client cards with MAC/IP/hostname info
+        # Try multiple selectors for client elements
+        client_cards = page.locator(
+            ".client-card, .client-item, [ng-repeat*=client], "
+            ".clients-table [ng-repeat*=item], .client-info, "
+            "[class*=client] [class*=mac], [class*=client] [class*=ip]"
+        ).all()
+
+        # Parse visible text for MAC addresses and associated data
+        body_text = page.locator("body").inner_text()
+        lines = body_text.split("\n")
+        current = {}
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            # Match MAC addresses (XX:XX:XX:XX:XX:XX)
+            mac_match = re.search(r'([0-9A-Fa-f]{2}[:.-]){5}[0-9A-Fa-f]{2}', line)
+            if mac_match:
+                if current.get("mac"):
+                    client = ClientInfo(mac=current["mac"])
+                    client.hostname = current.get("hostname", "")
+                    client.ip = current.get("ip", "")
+                    clients.append(client)
+                current = {"mac": mac_match.group(0).upper()}
+            elif current:
+                # Check for IP address
+                ip_match = re.search(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}', line)
+                if ip_match:
+                    current["ip"] = ip_match.group(0)
+                elif line and len(line) < 50 and not line.startswith("http"):
+                    current["hostname"] = line
+
+        # Don't forget the last one
+        if current.get("mac"):
+            client = ClientInfo(mac=current["mac"])
+            client.hostname = current.get("hostname", "")
+            client.ip = current.get("ip", "")
+            clients.append(client)
+
+        # Check for "Connected Clients" count
+        count_match = re.search(r'(?:connected|clients)\s*[: ]\s*(\d+)', body_text, re.IGNORECASE)
+        if count_match:
+            self._connected_count = int(count_match.group(1))
+
+        return clients
+
+    def _scrape_client_mgmt(self) -> list[ClientInfo]:
+        """Scrape WiFi Client Management page for detailed client info.
+        
+        Shows per-client: MAC, Hostname, SSID, Band (2.4GHz/5GHz),
+        Signal strength (0-100%), IPv4, IPv6.
+        """
+        page = self._page
+        page.goto(self._page_urls["clientmgm"], wait_until="networkidle", timeout=15000)
+        page.wait_for_timeout(3000)
+
+        clients = []
+        body_text = page.locator("body").inner_text()
+        lines = body_text.split("\n")
+
+        current = {}
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            mac_match = re.search(r'([0-9A-Fa-f]{2}[:.-]){5}[0-9A-Fa-f]{2}', line)
+            if mac_match:
+                if current.get("mac"):
+                    clients.append(self._build_client(current))
+                current = {"mac": mac_match.group(0).upper()}
+            elif current:
+                # Signal strength - percentage or "X%" or "Signal: X"
+                sig_match = re.search(r'(\d{1,3})\s*%', line)
+                if sig_match:
+                    current["signal"] = int(sig_match.group(1))
+                # Band detection
+                if "2.4" in line and "GHz" in line:
+                    current["band"] = "2.4GHz"
+                elif "5" in line and "GHz" in line:
+                    current["band"] = "5GHz"
+                # SSID detection (not MAC, not IP, reasonable length)
+                ip_match = re.search(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}', line)
+                if ip_match and "ip" not in current:
+                    current["ip"] = ip_match.group(0)
+                # Simple SSID heuristic: text between 2-30 chars not matching other patterns
+                elif (2 < len(line) < 30 and line != current.get("mac", "")
+                      and not line.startswith("http") and not line.startswith("192.")
+                      and not re.match(r'^\d+%$', line)
+                      and "hostname" not in current):
+                    current["hostname"] = line
+
+        if current.get("mac"):
+            clients.append(self._build_client(current))
+
+        return clients
+
+    def _build_client(self, raw: dict) -> ClientInfo:
+        """Build ClientInfo from raw parsed dict."""
+        return ClientInfo(
+            mac=raw.get("mac", ""),
+            hostname=raw.get("hostname", ""),
+            ip=raw.get("ip", ""),
+            ssid=raw.get("ssid", ""),
+            band=raw.get("band", ""),
+            signal=raw.get("signal", 0),
+            ipv6=raw.get("ipv6", ""),
+        )
 
     def close(self):
         """Clean up browser resources."""
