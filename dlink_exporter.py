@@ -212,15 +212,17 @@ class MetricsCollector:
                 # Only use the new scrape if it has at least some web-scraped data.
                 # Otherwise fall back to the last good scrape (avoids tables going empty
                 # when the browser scrape occasionally fails).
-                use_scraped = scraped
                 has_web_data = (
                     scraped.interfaces or scraped.ports or scraped.dhcp_leases
                     or scraped.clients or scraped.wifi_clients
                 )
-                if not has_web_data and self._last_good_scraped is not None:
+                if has_web_data:
+                    self._last_good_scraped = scraped
+                    use_scraped = scraped
+                elif self._last_good_scraped is not None:
                     use_scraped = self._last_good_scraped
                 else:
-                    self._last_good_scraped = scraped
+                    use_scraped = scraped
                 self.add_web_scraped_metrics(lines, use_scraped)
         except Exception as e:
             log.error("Scrape error: %s", e)
@@ -684,6 +686,10 @@ def run_exporter(config):
                                  len(last_scraped.interfaces), len(last_scraped.ports),
                                  len(last_scraped.dhcp_leases), len(last_scraped.clients),
                                  len(last_scraped.routes), len(last_scraped.syslog_entries))
+                        # Immediately push browser data to metrics endpoint so Prometheus
+                        # doesn't scrape stale CPE-only data during the 60s window.
+                        collector.scrape(scraped=last_scraped)
+                        last_metrics_scrape = now
                         # If result has no web data, retry once
                         if attempt == 0 and not (
                             last_scraped.interfaces or last_scraped.ports
