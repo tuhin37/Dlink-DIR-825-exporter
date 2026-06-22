@@ -1,6 +1,6 @@
 services:
   exporter:
-    image: fidays/dlink-dir-825-exporter:latest
+    image: fidays/dlink-dir-825-exporter:v0.1.2
     container_name: dlink-exporter
     restart: unless-stopped
     ports:
