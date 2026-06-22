@@ -2,6 +2,8 @@
 
 Prometheus exporter for D-Link DIR-825 routers. Collects metrics via CPE JSON-RPC API and Playwright web scraping. Writes syslog to a file for Promtail to ship to Loki.
 
+Pre-built images: [`fidays/dlink-dir-825-exporter`](https://hub.docker.com/r/fidays/dlink-dir-825-exporter) on Docker Hub (linux/arm64).
+
 ## Architecture
 
 ```
@@ -17,6 +19,8 @@ Prometheus ────────▶│  dlink_exporter.py           │
                                                           │ Promtail │────▶ Loki
                                                           └──────────┘
 ```
+
+For full web-scraped metrics (port stats, DHCP, WiFi clients), a Playwright/Chromium browser sidecar runs alongside the exporter.
 
 ## Metrics Exported
 
@@ -77,22 +81,78 @@ For web-scraped metrics (port stats, DHCP leases, WiFi clients, syslog), install
 playwright install chromium
 ```
 
-### Option 2: Docker (arm64 image available)
-
-Pre-built images for `linux/arm64` at Docker Hub:
+### Option 2: Docker Compose (recommended)
 
 ```bash
-docker pull tuhin37/dlink-dir-825-exporter:latest
+# Clone the repo
+git clone https://github.com/tuhin37/Dlink-DIR-825-exporter.git
+cd Dlink-DIR-825-exporter
+
+# Create .env with your router credentials
+cp config.yaml.example config.yaml
+# OR create .env file:
+echo "DLINK_ROUTER_HOST=10.0.0.1" >> .env
+echo "DLINK_USERNAME=admin" >> .env
+echo "DLINK_PASSWORD=your_router_password" >> .env
+
+# Start both exporter and browser sidecar
+docker compose up -d
+```
+
+This starts two containers:
+- **exporter** (`fidays/dlink-dir-825-exporter`) — serves Prometheus metrics on `:9101/metrics`
+- **browser-service** (`fidays/dlink-browser-service`) — Playwright/Chromium sidecar for web scraping
+
+### Option 3: Docker (standalone exporter only)
+
+```bash
+docker pull fidays/dlink-dir-825-exporter:latest
 docker run -d \
   --name dlink-exporter \
   --restart unless-stopped \
   -p 9101:9101 \
   -v /var/log/dlink:/var/log/dlink \
   --env-file .env \
-  ghcr.io/tuhin37/dlink-dir-825-exporter:latest
+  fidays/dlink-dir-825-exporter:latest
 ```
 
-> **Note:** The image does NOT include Chromium/Playwright — web-scraped metrics (port stats, DHCP leases, WiFi clients, syslog) will show placeholder values. To enable full scraping, either run natively with Playwright installed or mount a sidecar browser.
+> **Note:** The exporter image does NOT include Chromium/Playwright — web-scraped metrics (port stats, DHCP leases, WiFi clients) will show placeholder values unless the browser sidecar is running.
+
+---
+
+## Docker Compose (full setup with browser sidecar)
+
+```yaml
+services:
+  exporter:
+    image: fidays/dlink-dir-825-exporter:latest
+    container_name: dlink-exporter
+    restart: unless-stopped
+    ports:
+      - "9101:9101"
+    env_file:
+      - .env
+    environment:
+      - DLINK_BROWSER_SERVICE=http://browser-service:9200
+    volumes:
+      - ./logs:/var/log/dlink
+    depends_on:
+      browser-service:
+        condition: service_healthy
+
+  browser-service:
+    image: fidays/dlink-browser-service:latest
+    container_name: dlink-browser
+    restart: unless-stopped
+    ports:
+      - "9201:9200"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9200/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+```
 
 ## Configuration
 
@@ -145,6 +205,32 @@ DLINK_LOG_FILE=/var/log/dlink/syslog.log
 | `DLINK_PASSWORD` | — | Router admin password (**required**) |
 | `DLINK_LISTEN_PORT` | `9101` | Metrics port for Prometheus scraping |
 | `DLINK_LOG_FILE` | `/var/log/dlink/syslog.log` | Syslog output path |
+
+## Building from Source
+
+```bash
+# Clone the repo
+git clone https://github.com/tuhin37/Dlink-DIR-825-exporter.git
+cd Dlink-DIR-825-exporter
+
+# Build exporter image
+docker build -t fidays/dlink-dir-825-exporter:latest .
+
+# Build browser sidecar image
+docker build -t fidays/dlink-browser-service:latest -f docker/browser-service/Dockerfile docker/browser-service/
+
+# Push to Docker Hub
+docker push fidays/dlink-dir-825-exporter:latest
+docker push fidays/dlink-browser-service:latest
+
+# Tag with version
+docker tag fidays/dlink-dir-825-exporter:latest fidays/dlink-dir-825-exporter:v0.1.2
+docker tag fidays/dlink-browser-service:latest fidays/dlink-browser-service:v0.1.2
+docker push fidays/dlink-dir-825-exporter:v0.1.2
+docker push fidays/dlink-browser-service:v0.1.2
+```
+
+> **Note:** Update the `VERSION` file before building a new release. Images must be pushed to Docker Hub under the [`fidays`](https://hub.docker.com/u/fidays) namespace.
 
 ## Versioning
 

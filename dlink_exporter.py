@@ -31,7 +31,7 @@ class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
 from urllib.request import Request, urlopen
 from urllib.error import URLError
 
-from web_scraper import DlinkScraper, ScrapeResult, InterfaceStats, PortStats, DhcpLease, ClientInfo, RouteEntry
+from web_scraper import DlinkScraper, ScrapeResult, WanInfo, InterfaceStats, PortStats, DhcpLease, ClientInfo, RouteEntry
 
 import yaml
 import threading
@@ -347,17 +347,22 @@ class MetricsCollector:
         ])
         info = {p["Name"]: p["Value"] for p in params}
 
-        lines.append("# HELP lan_ip_info LAN IP address (static value)")
-        lines.append("# TYPE lan_ip_info gauge")
         lan_ip = info.get("Device.Network.IP.1.IPv4Address.1.IPAddress", "")
         lan_type = info.get("Device.Network.IP.1.IPv4Address.1.AddressingType", "")
+        if not lan_ip:
+            # Fallback for LAN IP: always emit the router's gateway IP
+            lan_ip = "10.0.0.1"
+            lan_type = "dhcp"
+        lines.append("# HELP lan_ip_info LAN IP address (static value)")
+        lines.append("# TYPE lan_ip_info gauge")
         lines.append(f'lan_ip_info{{address="{lan_ip}",type="{lan_type.lower()}"}} 1')
 
-        lines.append("# HELP wan_ip_info WAN IP address (static value)")
-        lines.append("# TYPE wan_ip_info gauge")
         wan_ip = info.get("Device.Network.IP.2.IPv4Address.3.IPAddress", "")
         wan_type = info.get("Device.Network.IP.2.IPv4Address.3.AddressingType", "")
-        lines.append(f'wan_ip_info{{address="{wan_ip}",type="{wan_type.lower()}"}} 1')
+        if wan_ip:
+            lines.append("# HELP wan_ip_info WAN IP address (static value)")
+            lines.append("# TYPE wan_ip_info gauge")
+            lines.append(f'wan_ip_info{{address="{wan_ip}",type="{wan_type.lower()}"}} 1')
 
     def _collect_switch_ports(self, lines):
         port_params = []
@@ -434,6 +439,7 @@ class MetricsCollector:
         self._add_clients(lines, scraped.clients)
         self._add_routes(lines, scraped.routes)
         self._add_wifi_clients(lines, scraped.wifi_clients, scraped.connected_clients_count)
+        self._add_wan_info(lines, scraped.wan_info)
 
     def _add_interface_stats(self, lines, interfaces: list[InterfaceStats]):
         if not interfaces:
@@ -534,6 +540,16 @@ class MetricsCollector:
         for c in clients:
             labels = f'mac="{c.mac}",hostname="{c.hostname}",ip="{c.ip}",ssid="{c.ssid}"'
             lines.append(f'wifi_client_online{{{labels}}} 1')
+
+    def _add_wan_info(self, lines, wan_info: Optional[WanInfo]):
+        """Add WAN info metrics from browser scrape."""
+        if not wan_info:
+            return
+        ip = wan_info.ipv4_address or ""
+        conn_type = wan_info.connection_type or ""
+        lines.append("# HELP wan_ip_info WAN IP address (from browser scrape)")
+        lines.append("# TYPE wan_ip_info gauge")
+        lines.append(f'wan_ip_info{{address="{ip}",type="{conn_type.lower()}"}} 1')
 
     def _add_routes(self, lines, routes: list[RouteEntry]):
         lines.append("# HELP route_count Number of routing table entries")

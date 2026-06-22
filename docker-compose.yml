@@ -1,6 +1,6 @@
 services:
   exporter:
-    image: tuhin37/dlink-dir-825-exporter:latest
+    image: fidays/dlink-dir-825-exporter:latest
     container_name: dlink-exporter
     restart: unless-stopped
     ports:
@@ -14,10 +14,9 @@ services:
     depends_on:
       browser-service:
         condition: service_healthy
-    pull_policy: never
 
   browser-service:
-    image: tuhin37/dlink-browser-service:latest
+    image: fidays/dlink-browser-service:latest
     container_name: dlink-browser
     restart: unless-stopped
     ports:
@@ -28,4 +27,3 @@ services:
       timeout: 5s
       retries: 5
       start_period: 20s
-    pull_policy: never

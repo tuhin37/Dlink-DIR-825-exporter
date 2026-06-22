@@ -10,8 +10,7 @@ through client-side Angular rendering. This module bridges that gap.
 
 import logging
 import re
-from datetime import datetime, timezone
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from typing import Optional
 
 log = logging.getLogger("dlink-exporter.scraper")
@@ -93,6 +92,7 @@ class ScrapeResult:
     syslog_entries: list[str] = field(default_factory=list)
     wifi_clients: list[ClientInfo] = field(default_factory=list)
     connected_clients_count: int = 0
+    wan_info: Optional[WanInfo] = None
 
 
 class DlinkScraper:
@@ -226,6 +226,8 @@ class DlinkScraper:
                 text = self._scrape_page_text("home")
                 result.wifi_clients = self._parse_clients_from_text(text)
                 result.connected_clients_count = len(result.wifi_clients)
+                # Also parse WAN info from the home page
+                result.wan_info = self._parse_wan_from_text(text)
             except Exception as e:
                 log.warning("Home page wifi scrape failed: %s", e)
 
@@ -902,6 +904,35 @@ class DlinkScraper:
         if current.get("mac"):
             clients.append(self._build_client(current))
         return clients
+
+    def _parse_wan_from_text(self, text: str) -> Optional[WanInfo]:
+        """Parse WAN info from home page dashboard text."""
+        info = WanInfo()
+        for line in text.split("\n"):
+            line = line.strip()
+            lower = line.lower()
+
+            # Look for WAN IP - typically near "internet" or "connection"
+            ip_match = re.search(r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})', line)
+            if ip_match:
+                ip = ip_match.group(1)
+                if ip not in ("0.0.0.0", "127.0.0.1") and not ip.startswith("169.254."):
+                    if not info.ipv4_address and "internet" in lower or "wan" in lower or "status" in lower or "connection" in lower:
+                        info.ipv4_address = ip
+                    elif not info.ipv4_address:
+                        info.ipv4_address = ip
+
+            # Connection type
+            if "connection" in lower:
+                for t in ["DHCP", "PPPoE", "Static", "PPTP", "L2TP"]:
+                    if t in line:
+                        info.connection_type = t
+
+        if info.ipv4_address:
+            log.info("Parsed WAN IP: %s (type=%s)", info.ipv4_address, info.connection_type)
+        else:
+            log.info("No WAN IP found in home page text")
+        return info if info.ipv4_address else None
 
     def close(self):
         """Clean up browser resources."""
